@@ -10,11 +10,11 @@ from aiogram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
-from app.analysis import evaluate
+from app.analysis import Evaluation, evaluate
 from app.config import Settings
 from app.notify import maybe_notify
 from app.pricing.maps_scraper import MapsScraperSource, RateLimitedError, ScrapeError
-from app.pricing.source import Direction, PriceSource, TariffClass
+from app.pricing.source import Direction, Price, PriceSource, TariffClass
 from app.storage import models as storage_models
 
 logger = logging.getLogger(__name__)
@@ -57,10 +57,55 @@ class PriceScheduler:
         if hasattr(self._source, "stop"):
             await self._source.stop()
 
+    @property
+    def paused_until(self) -> datetime | None:
+        """Не None, пока действует бэкофф после RateLimitedError - для /health."""
+        return self._paused_until
+
     def _in_active_window(self, now: datetime) -> bool:
         if now.weekday() > FRIDAY:
             return False
         return self._settings.active_window_start <= now.time() <= self._settings.active_window_end
+
+    async def fetch_price(self, direction: Direction) -> Price:
+        """Разовый запрос цены к источнику - без сохранения и без учёта паузы/окна.
+
+        Используется и опросом по расписанию, и командой /now.
+        """
+        origin, destination = direction.route(self._settings.home, self._settings.office)
+        return await self._source.get_price(origin, destination, TariffClass.ECONOM)
+
+    async def record_and_maybe_notify(self, direction: Direction, price: Price, now: datetime) -> Evaluation:
+        """Сохраняет цену, оценивает её и, если статус хороший, уведомляет чат.
+
+        Общая точка для планового опроса, /now и /report_price - чтобы у всех
+        трёх путей была одна и та же логика оценки и анти-спама, а не три копии.
+        """
+        # История - до вставки нового сэмпла, иначе evaluate() сравнит цену саму с собой.
+        history = storage_models.fetch_price_samples(self._conn, direction.value)
+        evaluation = evaluate(history, price.amount, now)
+
+        sample = storage_models.PriceSample(
+            direction=direction.value,
+            ts=price.ts,
+            price=price.amount,
+            tariff=price.tariff.value,
+            source=price.source,
+            eta_min=price.eta_min,
+        )
+        storage_models.insert_price_sample(self._conn, sample)
+        logger.info("%s: %.0f ₽ (%s мин), статус %s", direction.value, price.amount, price.eta_min, evaluation.status.value)
+
+        await maybe_notify(
+            self._bot,
+            self._conn,
+            self._settings.chat_id,
+            direction,
+            evaluation,
+            price.eta_min,
+            now,
+        )
+        return evaluation
 
     async def _poll_once(self, now: datetime | None = None) -> None:
         now = now if now is not None else datetime.now(self._settings.timezone)
@@ -74,9 +119,8 @@ class PriceScheduler:
             return
 
         for direction in (Direction.TO_OFFICE, Direction.TO_HOME):
-            origin, destination = direction.route(self._settings.home, self._settings.office)
             try:
-                price = await self._source.get_price(origin, destination, TariffClass.ECONOM)
+                price = await self.fetch_price(direction)
             except RateLimitedError as exc:
                 backoff = timedelta(seconds=exc.retry_after_sec) if exc.retry_after_sec else DEFAULT_RATE_LIMIT_BACKOFF
                 backoff = max(backoff, DEFAULT_RATE_LIMIT_BACKOFF)
@@ -87,27 +131,4 @@ class PriceScheduler:
                 logger.exception("Не удалось получить цену для направления %s", direction.value)
                 continue
 
-            # История - до вставки нового сэмпла, иначе evaluate() сравнит цену саму с собой.
-            history = storage_models.fetch_price_samples(self._conn, direction.value)
-            evaluation = evaluate(history, price.amount, now)
-
-            sample = storage_models.PriceSample(
-                direction=direction.value,
-                ts=price.ts,
-                price=price.amount,
-                tariff=price.tariff.value,
-                source=price.source,
-                eta_min=price.eta_min,
-            )
-            storage_models.insert_price_sample(self._conn, sample)
-            logger.info("%s: %.0f ₽ (%s мин), статус %s", direction.value, price.amount, price.eta_min, evaluation.status.value)
-
-            await maybe_notify(
-                self._bot,
-                self._conn,
-                self._settings.chat_id,
-                direction,
-                evaluation,
-                price.eta_min,
-                now,
-            )
+            await self.record_and_maybe_notify(direction, price, now)
