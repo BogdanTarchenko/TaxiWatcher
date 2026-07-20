@@ -1,0 +1,4 @@
+aiogram>=3.13
+APScheduler>=3.10
+playwright>=1.47
+python-dotenv>=1.0
