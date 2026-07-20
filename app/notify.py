@@ -1,4 +1,4 @@
-"""Анти-спам/кулдаун и отправка уведомлений в чат."""
+"""Анти-спам/кулдаун и рассылка push-уведомлений подписчикам."""
 
 from __future__ import annotations
 
@@ -6,12 +6,11 @@ import logging
 import sqlite3
 from datetime import datetime
 
-from aiogram import Bot
-
 from app.analysis import Evaluation, PriceStatus
-from app.bot.formatting import format_notification
+from app.formatting import build_notification_payload
 from app.pricing.source import Direction
 from app.storage import models as storage_models
+from app.webpush import DeadSubscription, VapidKeys, send_push
 
 logger = logging.getLogger(__name__)
 
@@ -40,20 +39,35 @@ def _should_notify(
 
 
 async def maybe_notify(
-    bot: Bot,
+    keys: VapidKeys,
     conn: sqlite3.Connection,
-    chat_id: int,
+    contact_email: str,
     direction: Direction,
     evaluation: Evaluation,
     eta_min: int | None,
     now: datetime,
 ) -> bool:
-    """Шлёт уведомление, если статус хороший и кулдаун пройден. Возвращает, отправили ли."""
+    """Шлёт push всем активным подпискам, если статус хороший и кулдаун пройден.
+
+    Возвращает, разослали ли реально (False и если статус не тот, и если
+    подписчиков ещё нет вообще - в этом случае кулдаун тоже не трогаем,
+    незачем гасить будущее уведомление ради того, кто его не получил).
+    """
     if not _should_notify(conn, direction, evaluation, now):
         return False
 
-    text = format_notification(direction, evaluation, eta_min)
-    await bot.send_message(chat_id, text)
+    subscriptions = storage_models.fetch_active_push_subscriptions(conn)
+    if not subscriptions:
+        logger.info("Цена хорошая (%s), но активных push-подписок пока нет", evaluation.status.value)
+        return False
+
+    payload = build_notification_payload(direction, evaluation, eta_min)
+    for subscription in subscriptions:
+        try:
+            await send_push(keys, subscription, payload, contact_email)
+        except DeadSubscription:
+            storage_models.deactivate_push_subscription(conn, subscription.endpoint)
+            logger.info("Деактивировал мёртвую подписку: %s", subscription.device_name or subscription.endpoint)
 
     storage_models.log_notification(
         conn,
@@ -64,5 +78,10 @@ async def maybe_notify(
             notif_type=evaluation.status.value,
         ),
     )
-    logger.info("Отправил уведомление %s для %s: %.0f ₽", evaluation.status.value, direction.value, evaluation.current_price)
+    logger.info(
+        "Уведомление %s для %s разослано %d подпискам",
+        evaluation.status.value,
+        direction.value,
+        len(subscriptions),
+    )
     return True

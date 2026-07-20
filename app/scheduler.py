@@ -6,7 +6,6 @@ import logging
 import sqlite3
 from datetime import datetime, timedelta
 
-from aiogram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
@@ -16,6 +15,7 @@ from app.notify import maybe_notify
 from app.pricing.maps_scraper import MapsScraperSource, RateLimitedError, ScrapeError
 from app.pricing.source import Direction, Price, PriceSource, TariffClass
 from app.storage import models as storage_models
+from app.webpush import VapidKeys
 
 logger = logging.getLogger(__name__)
 
@@ -31,12 +31,12 @@ class PriceScheduler:
         self,
         settings: Settings,
         conn: sqlite3.Connection,
-        bot: Bot,
+        vapid_keys: VapidKeys,
         source: PriceSource | None = None,
     ) -> None:
         self._settings = settings
         self._conn = conn
-        self._bot = bot
+        self._vapid_keys = vapid_keys
         self._source = source if source is not None else MapsScraperSource()
         self._scheduler = AsyncIOScheduler(timezone=settings.timezone)
         self._paused_until: datetime | None = None
@@ -97,9 +97,9 @@ class PriceScheduler:
         logger.info("%s: %.0f ₽ (%s мин), статус %s", direction.value, price.amount, price.eta_min, evaluation.status.value)
 
         await maybe_notify(
-            self._bot,
+            self._vapid_keys,
             self._conn,
-            self._settings.chat_id,
+            self._settings.vapid_contact_email,
             direction,
             evaluation,
             price.eta_min,
