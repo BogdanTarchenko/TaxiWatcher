@@ -93,6 +93,25 @@ async function loadStatus() {
   footer.textContent = `${data.settings.tariff} · окно ${data.settings.window} · ${data.settings.timezone}`;
 }
 
+function setSubscribedUi() {
+  const btn = document.getElementById("subscribe-btn");
+  btn.textContent = "Уведомления включены ✓";
+  btn.disabled = true;
+}
+
+async function checkPushStatus() {
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) return;
+
+  try {
+    const registration = await navigator.serviceWorker.getRegistration();
+    if (!registration) return;
+    const subscription = await registration.pushManager.getSubscription();
+    if (subscription) setSubscribedUi();
+  } catch (err) {
+    console.warn("Не удалось проверить статус подписки", err);
+  }
+}
+
 async function subscribeToPush() {
   const btn = document.getElementById("subscribe-btn");
   const hint = document.getElementById("push-hint");
@@ -146,7 +165,7 @@ async function subscribeToPush() {
       body: JSON.stringify({ endpoint: raw.endpoint, keys: raw.keys, device_name: deviceName }),
     });
 
-    btn.textContent = "Уведомления включены ✓";
+    setSubscribedUi();
   } catch (err) {
     console.error(err);
     alert("Не получилось включить уведомления: " + err.message);
@@ -182,11 +201,21 @@ async function submitReport(event) {
   loadStatus();
 }
 
+const REFRESH_INTERVAL_MS = 60000;
+
 document.getElementById("subscribe-btn").addEventListener("click", subscribeToPush);
 document.getElementById("report-form").addEventListener("submit", submitReport);
 
 if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.register("sw.js").catch((err) => console.warn("SW register failed", err));
+  navigator.serviceWorker
+    .register("sw.js")
+    .then(() => checkPushStatus())
+    .catch((err) => console.warn("SW register failed", err));
 }
 
 loadStatus();
+setInterval(loadStatus, REFRESH_INTERVAL_MS);
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") loadStatus();
+});
