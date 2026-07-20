@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sqlite3
 from datetime import datetime, timedelta
@@ -26,6 +27,11 @@ logger = logging.getLogger(__name__)
 BASE_RATE_LIMIT_BACKOFF = timedelta(minutes=5)
 MAX_RATE_LIMIT_BACKOFF = timedelta(minutes=30)
 FRIDAY = 4  # datetime.weekday(): Monday=0 ... Sunday=6, опрашиваем только пн-пт
+
+# Два запроса к Яндекс.Картам подряд без паузы почти всегда ловят 429 на втором,
+# даже если первый только что прошёл успешно - похоже на короткий burst-лимит,
+# а не на что-то специфичное для направления. Пауза между направлениями лечит это.
+FETCH_GAP_SECONDS = 5
 
 
 class PriceScheduler:
@@ -147,7 +153,9 @@ class PriceScheduler:
         if not self._in_active_window(now):
             return
 
-        for direction in (Direction.TO_OFFICE, Direction.TO_HOME):
+        for i, direction in enumerate((Direction.TO_OFFICE, Direction.TO_HOME)):
+            if i > 0:
+                await asyncio.sleep(FETCH_GAP_SECONDS)
             try:
                 price = await self.fetch_price_respecting_pause(direction, now)
             except RateLimitedError:

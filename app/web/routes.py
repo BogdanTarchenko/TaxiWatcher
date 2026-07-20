@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -20,14 +21,16 @@ from app.formatting import DIRECTION_LABELS
 from app.pricing.manual import InvalidManualPrice, build_manual_price
 from app.pricing.maps_scraper import RateLimitedError, ScrapeError
 from app.pricing.source import Direction, TariffClass
-from app.scheduler import PriceScheduler
+from app.scheduler import FETCH_GAP_SECONDS, PriceScheduler
 from app.storage import models as storage_models
 from app.webpush import VapidKeys
 
 DIRECTION_TOKENS = {"office": Direction.TO_OFFICE, "home": Direction.TO_HOME}
 
 
-async def _direction_status(app: web.Application, direction: Direction) -> dict:
+async def _direction_status(app: web.Application, direction: Direction) -> tuple[dict, bool]:
+    """Возвращает (payload, сходили_ли_за_свежей_ценой) - второе нужно вызывающему
+    коду, чтобы решить, требуется ли пауза перед следующим направлением."""
     settings: Settings = app["settings"]
     conn: sqlite3.Connection = app["conn"]
     scheduler: PriceScheduler = app["scheduler"]
@@ -41,12 +44,15 @@ async def _direction_status(app: web.Application, direction: Direction) -> dict:
         try:
             price = await scheduler.fetch_price_respecting_pause(direction, now)
         except RateLimitedError:
-            return {"label": DIRECTION_LABELS[direction], "error": "rate_limited"}
+            return {"label": DIRECTION_LABELS[direction], "error": "rate_limited"}, True
         except ScrapeError:
-            return {"label": DIRECTION_LABELS[direction], "error": "scrape_failed"}
+            return {"label": DIRECTION_LABELS[direction], "error": "scrape_failed"}, True
         await scheduler.record_and_maybe_notify(direction, price, now)
         samples = storage_models.fetch_price_samples(conn, direction.value)
         latest = samples[-1]
+        fetched = True
+    else:
+        fetched = False
 
     history = samples[:-1]
     evaluation = evaluate(history, latest.price, now)
@@ -60,7 +66,7 @@ async def _direction_status(app: web.Application, direction: Direction) -> dict:
         "bucket_median": evaluation.bucket_median,
         "bucket_p25": evaluation.bucket_p25,
         "error": None,
-    }
+    }, fetched
 
 
 async def handle_status(request: web.Request) -> web.Response:
@@ -72,8 +78,13 @@ async def handle_status(request: web.Request) -> web.Response:
 
     directions = {}
     best_today = {}
+    fetched_previous = False
     for key, direction in DIRECTION_TOKENS.items():
-        directions[key] = await _direction_status(request.app, direction)
+        if fetched_previous:
+            # Только что реально ходили к Яндексу за прошлым направлением - без
+            # паузы второй запрос почти гарантированно поймает 429 (см. scheduler).
+            await asyncio.sleep(FETCH_GAP_SECONDS)
+        directions[key], fetched_previous = await _direction_status(request.app, direction)
 
         history = storage_models.fetch_price_samples(conn, direction.value)
         best_today[key] = [
