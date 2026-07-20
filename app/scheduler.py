@@ -28,11 +28,6 @@ BASE_RATE_LIMIT_BACKOFF = timedelta(minutes=5)
 MAX_RATE_LIMIT_BACKOFF = timedelta(minutes=30)
 FRIDAY = 4  # datetime.weekday(): Monday=0 ... Sunday=6, опрашиваем только пн-пт
 
-# Два запроса к Яндекс.Картам подряд без паузы почти всегда ловят 429 на втором,
-# даже если первый только что прошёл успешно - похоже на короткий burst-лимит,
-# а не на что-то специфичное для направления. Пауза между направлениями лечит это.
-FETCH_GAP_SECONDS = 5
-
 
 class PriceScheduler:
     """Владеет живущим весь процесс источником цены и опрашивает оба направления по расписанию."""
@@ -147,21 +142,28 @@ class PriceScheduler:
         )
         return evaluation
 
+    async def _fetch_and_record(self, direction: Direction, now: datetime) -> None:
+        try:
+            price = await self.fetch_price_respecting_pause(direction, now)
+        except RateLimitedError:
+            return
+        except ScrapeError:
+            logger.exception("Не удалось получить цену для направления %s", direction.value)
+            return
+
+        await self.record_and_maybe_notify(direction, price, now)
+
     async def _poll_once(self, now: datetime | None = None) -> None:
         now = now if now is not None else datetime.now(self._settings.timezone)
 
         if not self._in_active_window(now):
             return
 
-        for i, direction in enumerate((Direction.TO_OFFICE, Direction.TO_HOME)):
-            if i > 0:
-                await asyncio.sleep(FETCH_GAP_SECONDS)
-            try:
-                price = await self.fetch_price_respecting_pause(direction, now)
-            except RateLimitedError:
-                return  # второе направление почти наверняка тоже упрётся в лимит - не пробуем
-            except ScrapeError:
-                logger.exception("Не удалось получить цену для направления %s", direction.value)
-                continue
-
-            await self.record_and_maybe_notify(direction, price, now)
+        # Оба направления параллельно, не по очереди - обычный HTTP GET (в отличие
+        # от прежнего Playwright-подхода) в тестах спокойно проходил и без паузы
+        # между направлениями, так что последовательный обход с задержкой был
+        # избыточной осторожностью.
+        await asyncio.gather(
+            self._fetch_and_record(Direction.TO_OFFICE, now),
+            self._fetch_and_record(Direction.TO_HOME, now),
+        )
