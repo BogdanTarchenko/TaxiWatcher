@@ -39,7 +39,7 @@ async def _direction_status(app: web.Application, direction: Direction) -> dict:
 
     if latest is None or (now - latest.ts) > freshness:
         try:
-            price = await scheduler.fetch_price(direction)
+            price = await scheduler.fetch_price_respecting_pause(direction, now)
         except RateLimitedError:
             return {"label": DIRECTION_LABELS[direction], "error": "rate_limited"}
         except ScrapeError:

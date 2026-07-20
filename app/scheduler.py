@@ -68,12 +68,30 @@ class PriceScheduler:
         return self._settings.active_window_start <= now.time() <= self._settings.active_window_end
 
     async def fetch_price(self, direction: Direction) -> Price:
-        """Разовый запрос цены к источнику - без сохранения и без учёта паузы/окна.
-
-        Используется и опросом по расписанию, и командой /now.
-        """
+        """Разовый запрос цены к источнику - без сохранения и без учёта паузы/окна."""
         origin, destination = direction.route(self._settings.home, self._settings.office)
         return await self._source.get_price(origin, destination, TariffClass.ECONOM)
+
+    async def fetch_price_respecting_pause(self, direction: Direction, now: datetime) -> Price:
+        """Как fetch_price(), но проверяет и продлевает паузу после RateLimitedError.
+
+        Нужен отдельно от _poll_once, потому что веб-страница тоже дёргает цену
+        по требованию (см. web/routes.py) - без этой проверки каждое открытие
+        страницы во время паузы било бы по Яндексу заново, вместо того чтобы
+        просто отдать уже известный rate_limited из памяти.
+        """
+        if self._paused_until is not None and now < self._paused_until:
+            raise RateLimitedError(retry_after_sec=int((self._paused_until - now).total_seconds()))
+        self._paused_until = None
+
+        try:
+            return await self.fetch_price(direction)
+        except RateLimitedError as exc:
+            backoff = timedelta(seconds=exc.retry_after_sec) if exc.retry_after_sec else DEFAULT_RATE_LIMIT_BACKOFF
+            backoff = max(backoff, DEFAULT_RATE_LIMIT_BACKOFF)
+            self._paused_until = now + backoff
+            logger.warning("Rate limited, пауза до %s", self._paused_until)
+            raise
 
     async def record_and_maybe_notify(self, direction: Direction, price: Price, now: datetime) -> Evaluation:
         """Сохраняет цену, оценивает её и, если статус хороший, уведомляет чат.
@@ -110,22 +128,13 @@ class PriceScheduler:
     async def _poll_once(self, now: datetime | None = None) -> None:
         now = now if now is not None else datetime.now(self._settings.timezone)
 
-        if self._paused_until is not None:
-            if now < self._paused_until:
-                return
-            self._paused_until = None
-
         if not self._in_active_window(now):
             return
 
         for direction in (Direction.TO_OFFICE, Direction.TO_HOME):
             try:
-                price = await self.fetch_price(direction)
-            except RateLimitedError as exc:
-                backoff = timedelta(seconds=exc.retry_after_sec) if exc.retry_after_sec else DEFAULT_RATE_LIMIT_BACKOFF
-                backoff = max(backoff, DEFAULT_RATE_LIMIT_BACKOFF)
-                self._paused_until = now + backoff
-                logger.warning("Rate limited, пауза опроса до %s", self._paused_until)
+                price = await self.fetch_price_respecting_pause(direction, now)
+            except RateLimitedError:
                 return  # второе направление почти наверняка тоже упрётся в лимит - не пробуем
             except ScrapeError:
                 logger.exception("Не удалось получить цену для направления %s", direction.value)
