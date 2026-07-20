@@ -1,4 +1,4 @@
-"""Таблицы: price_samples, notifications_log, settings.
+"""Таблицы: price_samples, notifications_log, settings, push_subscriptions.
 
 Направление хранится строкой ('to_office' / 'to_home') — этот же контракт
 использует Direction в pricing/source.py, отдельный enum-тип в БД не нужен.
@@ -105,3 +105,60 @@ def set_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
         (key, value),
     )
     conn.commit()
+
+
+@dataclass(frozen=True)
+class PushSubscription:
+    endpoint: str
+    p256dh: str
+    auth: str
+    device_name: str | None = None
+    created_at: datetime | None = None
+    is_active: bool = True
+    id: int | None = None
+
+
+def upsert_push_subscription(
+    conn: sqlite3.Connection,
+    endpoint: str,
+    p256dh: str,
+    auth: str,
+    device_name: str | None,
+    now: datetime,
+) -> int:
+    """Один браузер/устройство = одна запись по endpoint. Повторная подписка того же
+    устройства обновляет ключи и снова помечает подписку активной."""
+    cur = conn.execute(
+        "INSERT INTO push_subscriptions (endpoint, p256dh, auth, device_name, created_at, is_active) "
+        "VALUES (?, ?, ?, ?, ?, 1) "
+        "ON CONFLICT(endpoint) DO UPDATE SET "
+        "p256dh = excluded.p256dh, auth = excluded.auth, device_name = excluded.device_name, is_active = 1",
+        (endpoint, p256dh, auth, device_name, now.isoformat()),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def deactivate_push_subscription(conn: sqlite3.Connection, endpoint: str) -> None:
+    """Отписка или "мёртвый" endpoint (push вернул 404/410) - не удаляем строку, просто гасим."""
+    conn.execute("UPDATE push_subscriptions SET is_active = 0 WHERE endpoint = ?", (endpoint,))
+    conn.commit()
+
+
+def fetch_active_push_subscriptions(conn: sqlite3.Connection) -> list[PushSubscription]:
+    rows = conn.execute(
+        "SELECT id, endpoint, p256dh, auth, device_name, created_at, is_active "
+        "FROM push_subscriptions WHERE is_active = 1"
+    ).fetchall()
+    return [
+        PushSubscription(
+            id=row["id"],
+            endpoint=row["endpoint"],
+            p256dh=row["p256dh"],
+            auth=row["auth"],
+            device_name=row["device_name"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            is_active=bool(row["is_active"]),
+        )
+        for row in rows
+    ]
