@@ -1,6 +1,5 @@
 aiohttp>=3.9
 APScheduler>=3.10
-playwright==1.61.0
 python-dotenv>=1.0
 tzdata>=2024.1
 pywebpush>=2.0

@@ -1,29 +1,36 @@
-"""PriceSource на Playwright: цена такси с виджета сравнения на Яндекс.Картах."""
+"""PriceSource через обычный HTTP GET на Яндекс.Карты.
+
+Цена такси отрисовывается сервером ещё до отдачи HTML (SSR) и лежит прямо в
+исходной странице как кусок JSON ("taxiInfo": {...}) - в браузере нет
+отдельного XHR-запроса за ней. Значит и полноценный headless-браузер не
+нужен: обычный GET + регулярка на JSON-блок дают то же самое, но быстрее и
+без Chromium на борту.
+"""
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from playwright.async_api import (
-    Browser,
-    BrowserContext,
-    Page,
-    Playwright,
-    TimeoutError as PlaywrightTimeoutError,
-    async_playwright,
-)
+import aiohttp
 
 from app.config import Coordinates
 from app.pricing.source import Price, TariffClass
 
-PRICE_RE = re.compile(r"~?\s*(\d[\d\s\xa0]*)\s*₽")
-ETA_RE = re.compile(r"(\d+)\s*мин")
+TAXI_INFO_RE = re.compile(r'"taxiInfo"\s*:\s*(\{[^{}]*\})')
+PRICE_DIGITS_RE = re.compile(r"(\d[\d\s\xa0]*)")
 
 DEBUG_DIR = Path("data/debug")
-NAV_TIMEOUT_MS = 20_000
-PRICE_TIMEOUT_MS = 15_000
+REQUEST_TIMEOUT_SEC = 20
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "ru-RU,ru;q=0.9",
+}
 
 
 class ScrapeError(RuntimeError):
@@ -31,7 +38,7 @@ class ScrapeError(RuntimeError):
 
 
 class RateLimitedError(ScrapeError):
-    """Яндекс ответил 429 — похоже, слишком частые заходы с этого IP.
+    """Яндекс ответил 429 - похоже, слишком частые заходы с этого IP.
 
     Отдельный тип специально для того, чтобы scheduler.py мог отличить
     временную блокировку от сломанной вёрстки и не долбить сайт чаще,
@@ -53,44 +60,41 @@ def _parse_retry_after(value: str | None) -> int | None:
     return int(value) if value and value.isdigit() else None
 
 
-def _parse_price_block(text: str) -> tuple[float, int | None]:
-    price_match = PRICE_RE.search(text)
-    if not price_match:
-        raise ScrapeError(f"Не нашёл цену в тексте блока такси: {text!r}")
-    amount = float(price_match.group(1).replace(" ", "").replace("\xa0", ""))
+def _extract_taxi_info(html: str) -> dict:
+    match = TAXI_INFO_RE.search(html)
+    if not match:
+        raise ScrapeError("Не нашёл блок taxiInfo в ответе (изменилась структура страницы?)")
+    try:
+        return json.loads(match.group(1))
+    except json.JSONDecodeError as exc:
+        raise ScrapeError(f"taxiInfo не распарсился как JSON: {match.group(1)!r}") from exc
 
-    eta_match = ETA_RE.search(text)
-    eta_min = int(eta_match.group(1)) if eta_match else None
 
-    return amount, eta_min
+def _parse_price_text(price_text: str) -> float:
+    match = PRICE_DIGITS_RE.search(price_text)
+    if not match:
+        raise ScrapeError(f"Не понял priceText: {price_text!r}")
+    return float(match.group(1).replace(" ", "").replace("\xa0", ""))
 
 
 class MapsScraperSource:
-    """Один переиспользуемый браузерный контекст вместо запуска браузера на каждый замер.
+    """Один переиспользуемый aiohttp.ClientSession вместо запроса на каждый замер.
 
-    Виджет такси на картах не даёт выбрать тариф — он всегда считает econom
-    (это видно по ссылке "Выбрать тариф", которая ведёт на .../order?tariff=econom).
+    Виджет такси на картах не даёт выбрать тариф - он всегда считает econom
+    (видно по taxiInfo.link, который всегда ведёт на .../order?tariff=econom).
     Поэтому get_price() отказывается работать с любым другим TariffClass.
     """
 
     def __init__(self) -> None:
-        self._playwright: Playwright | None = None
-        self._browser: Browser | None = None
-        self._context: BrowserContext | None = None
+        self._session: aiohttp.ClientSession | None = None
 
     async def start(self) -> None:
-        self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.chromium.launch(headless=True)
-        self._context = await self._browser.new_context(locale="ru-RU")
+        self._session = aiohttp.ClientSession(headers=HEADERS)
 
     async def stop(self) -> None:
-        if self._context is not None:
-            await self._context.close()
-        if self._browser is not None:
-            await self._browser.close()
-        if self._playwright is not None:
-            await self._playwright.stop()
-        self._context = self._browser = self._playwright = None
+        if self._session is not None:
+            await self._session.close()
+        self._session = None
 
     async def get_price(
         self,
@@ -102,38 +106,45 @@ class MapsScraperSource:
             raise NotImplementedError(
                 f"Виджет такси на картах всегда считает econom, {tariff.value} недоступен"
             )
-        if self._context is None:
-            raise RuntimeError("MapsScraperSource не запущен — вызови start() перед get_price()")
+        if self._session is None:
+            raise RuntimeError("MapsScraperSource не запущен - вызови start() перед get_price()")
 
         url = _build_url(origin, destination)
-        page = await self._context.new_page()
-        try:
-            response = await page.goto(url, timeout=NAV_TIMEOUT_MS)
-            if response is not None and response.status == 429:
-                raise RateLimitedError(_parse_retry_after(response.headers.get("retry-after")))
+        timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SEC)
 
-            taxi_item = page.get_by_role("listitem", name=re.compile("такси", re.IGNORECASE)).first
-            await taxi_item.wait_for(timeout=PRICE_TIMEOUT_MS)
-            text = await taxi_item.inner_text()
-            amount, eta_min = _parse_price_block(text)
-            return Price(
-                amount=amount,
-                tariff=tariff,
-                source="maps_scrape",
-                ts=datetime.now(timezone.utc),
-                eta_min=eta_min,
-            )
+        try:
+            async with self._session.get(url, timeout=timeout) as response:
+                if response.status == 429:
+                    raise RateLimitedError(_parse_retry_after(response.headers.get("Retry-After")))
+                if response.status != 200:
+                    raise ScrapeError(f"Яндекс.Карты ответили статусом {response.status}")
+                html = await response.text()
         except RateLimitedError:
             raise
-        except (PlaywrightTimeoutError, ScrapeError) as exc:
-            debug_path = await self._save_debug_snapshot(page)
-            raise ScrapeError(f"Не удалось прочитать цену такси, снимок: {debug_path}") from exc
-        finally:
-            await page.close()
+        except aiohttp.ClientError as exc:
+            raise ScrapeError(f"Сетевая ошибка при запросе к Яндекс.Картам: {exc}") from exc
 
-    async def _save_debug_snapshot(self, page: Page) -> Path:
+        try:
+            taxi_info = _extract_taxi_info(html)
+            amount = _parse_price_text(taxi_info.get("priceText", ""))
+        except ScrapeError as exc:
+            debug_path = await self._save_debug_html(html)
+            raise ScrapeError(f"{exc}, снимок: {debug_path}") from exc
+
+        eta_seconds = taxi_info.get("time")
+        eta_min = round(eta_seconds / 60) if isinstance(eta_seconds, (int, float)) else None
+
+        return Price(
+            amount=amount,
+            tariff=tariff,
+            source="maps_scrape",
+            ts=datetime.now(timezone.utc),
+            eta_min=eta_min,
+        )
+
+    async def _save_debug_html(self, html: str) -> Path:
         DEBUG_DIR.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        path = DEBUG_DIR / f"scrape_fail_{stamp}.png"
-        await page.screenshot(path=str(path))
+        path = DEBUG_DIR / f"scrape_fail_{stamp}.html"
+        path.write_text(html, encoding="utf-8")
         return path

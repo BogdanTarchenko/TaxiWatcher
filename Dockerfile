@@ -1,6 +1,6 @@
-# Версия тега образа должна совпадать с версией пакета playwright в requirements.txt -
-# в образе уже стоит Chromium под конкретную версию Playwright, рассинхрон роняет запуск браузера.
-FROM mcr.microsoft.com/playwright/python:v1.61.0-jammy
+# Цена вытаскивается обычным HTTP GET (см. app/pricing/maps_scraper.py) - браузер
+# больше не нужен, обычный слим-образ вместо тяжёлого Playwright+Chromium.
+FROM python:3.13-slim
 
 WORKDIR /app
 
