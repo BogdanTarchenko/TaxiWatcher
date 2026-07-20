@@ -1,4 +1,4 @@
-"""Загружает настройки из .env: токен, координаты, окно, тайм-зона, тариф."""
+"""Загружает настройки из .env: координаты, окно, тайм-зона, тариф, веб-доступ."""
 
 from __future__ import annotations
 
@@ -26,8 +26,6 @@ class Coordinates:
 
 @dataclass(frozen=True)
 class Settings:
-    bot_token: str
-    chat_id: int
     home: Coordinates
     office: Coordinates
     tariff: str
@@ -83,8 +81,6 @@ def load_settings(env_file: Path | str = ".env") -> Settings:
     load_dotenv(env_file, override=False)
 
     return Settings(
-        bot_token=_require("BOT_TOKEN"),
-        chat_id=_parse_int("CHAT_ID"),
         home=Coordinates(_parse_float("HOME_LAT"), _parse_float("HOME_LON")),
         office=Coordinates(_parse_float("OFFICE_LAT"), _parse_float("OFFICE_LON")),
         tariff=_require("TARIFF"),
