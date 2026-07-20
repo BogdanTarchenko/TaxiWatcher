@@ -36,6 +36,7 @@ class Settings:
     active_window_end: time
     poll_interval_min: int
     vapid_contact_email: str
+    app_secret_path: str
 
 
 def _require(name: str) -> str:
@@ -92,4 +93,5 @@ def load_settings(env_file: Path | str = ".env") -> Settings:
         active_window_end=_parse_time("ACTIVE_WINDOW_END"),
         poll_interval_min=_parse_int("POLL_INTERVAL_MIN"),
         vapid_contact_email=_require("VAPID_CONTACT_EMAIL"),
+        app_secret_path=_require("APP_SECRET_PATH"),
     )
