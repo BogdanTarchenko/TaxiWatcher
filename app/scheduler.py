@@ -19,8 +19,12 @@ from app.webpush import VapidKeys
 
 logger = logging.getLogger(__name__)
 
-# Даже без Retry-After не ретраим быстро - живой 429 у нас держался дольше пары минут.
-DEFAULT_RATE_LIMIT_BACKOFF = timedelta(minutes=30)
+# 429 у Яндекса бывает и коротким всплеском (следующий запрос через пару минут уже
+# проходит), и затяжной блокировкой (час и больше). Раз не знаем заранее, какой это
+# случай - начинаем с короткой паузы и удваиваем на каждый следующий подряд идущий
+# 429, до потолка; первый же успешный запрос сбрасывает счётчик обратно.
+BASE_RATE_LIMIT_BACKOFF = timedelta(minutes=5)
+MAX_RATE_LIMIT_BACKOFF = timedelta(minutes=30)
 FRIDAY = 4  # datetime.weekday(): Monday=0 ... Sunday=6, опрашиваем только пн-пт
 
 
@@ -40,6 +44,7 @@ class PriceScheduler:
         self._source = source if source is not None else MapsScraperSource()
         self._scheduler = AsyncIOScheduler(timezone=settings.timezone)
         self._paused_until: datetime | None = None
+        self._consecutive_rate_limits = 0
 
     async def start(self) -> None:
         if hasattr(self._source, "start"):
@@ -85,13 +90,23 @@ class PriceScheduler:
         self._paused_until = None
 
         try:
-            return await self.fetch_price(direction)
+            price = await self.fetch_price(direction)
         except RateLimitedError as exc:
-            backoff = timedelta(seconds=exc.retry_after_sec) if exc.retry_after_sec else DEFAULT_RATE_LIMIT_BACKOFF
-            backoff = max(backoff, DEFAULT_RATE_LIMIT_BACKOFF)
+            self._consecutive_rate_limits += 1
+            backoff = BASE_RATE_LIMIT_BACKOFF * (2 ** (self._consecutive_rate_limits - 1))
+            if exc.retry_after_sec:
+                backoff = max(backoff, timedelta(seconds=exc.retry_after_sec))
+            backoff = min(backoff, MAX_RATE_LIMIT_BACKOFF)
             self._paused_until = now + backoff
-            logger.warning("Rate limited, пауза до %s", self._paused_until)
+            logger.warning(
+                "Rate limited (%d раз подряд), пауза до %s",
+                self._consecutive_rate_limits,
+                self._paused_until,
+            )
             raise
+        else:
+            self._consecutive_rate_limits = 0
+            return price
 
     async def record_and_maybe_notify(self, direction: Direction, price: Price, now: datetime) -> Evaluation:
         """Сохраняет цену, оценивает её и, если статус хороший, уведомляет чат.
