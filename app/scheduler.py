@@ -6,10 +6,13 @@ import logging
 import sqlite3
 from datetime import datetime, timedelta
 
+from aiogram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
+from app.analysis import evaluate
 from app.config import Settings
+from app.notify import maybe_notify
 from app.pricing.maps_scraper import MapsScraperSource, RateLimitedError, ScrapeError
 from app.pricing.source import Direction, PriceSource, TariffClass
 from app.storage import models as storage_models
@@ -24,9 +27,16 @@ FRIDAY = 4  # datetime.weekday(): Monday=0 ... Sunday=6, опрашиваем т
 class PriceScheduler:
     """Владеет живущим весь процесс источником цены и опрашивает оба направления по расписанию."""
 
-    def __init__(self, settings: Settings, conn: sqlite3.Connection, source: PriceSource | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        conn: sqlite3.Connection,
+        bot: Bot,
+        source: PriceSource | None = None,
+    ) -> None:
         self._settings = settings
         self._conn = conn
+        self._bot = bot
         self._source = source if source is not None else MapsScraperSource()
         self._scheduler = AsyncIOScheduler(timezone=settings.timezone)
         self._paused_until: datetime | None = None
@@ -52,8 +62,8 @@ class PriceScheduler:
             return False
         return self._settings.active_window_start <= now.time() <= self._settings.active_window_end
 
-    async def _poll_once(self) -> None:
-        now = datetime.now(self._settings.timezone)
+    async def _poll_once(self, now: datetime | None = None) -> None:
+        now = now if now is not None else datetime.now(self._settings.timezone)
 
         if self._paused_until is not None:
             if now < self._paused_until:
@@ -77,6 +87,10 @@ class PriceScheduler:
                 logger.exception("Не удалось получить цену для направления %s", direction.value)
                 continue
 
+            # История - до вставки нового сэмпла, иначе evaluate() сравнит цену саму с собой.
+            history = storage_models.fetch_price_samples(self._conn, direction.value)
+            evaluation = evaluate(history, price.amount, now)
+
             sample = storage_models.PriceSample(
                 direction=direction.value,
                 ts=price.ts,
@@ -86,4 +100,14 @@ class PriceScheduler:
                 eta_min=price.eta_min,
             )
             storage_models.insert_price_sample(self._conn, sample)
-            logger.info("%s: %.0f ₽ (%s мин)", direction.value, price.amount, price.eta_min)
+            logger.info("%s: %.0f ₽ (%s мин), статус %s", direction.value, price.amount, price.eta_min, evaluation.status.value)
+
+            await maybe_notify(
+                self._bot,
+                self._conn,
+                self._settings.chat_id,
+                direction,
+                evaluation,
+                price.eta_min,
+                now,
+            )
