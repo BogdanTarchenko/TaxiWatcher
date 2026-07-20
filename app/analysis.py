@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, tzinfo as TzInfo
 from enum import Enum
 from statistics import median
 
@@ -38,8 +38,11 @@ class BucketStats:
     sample_count: int
 
 
-def _bucket_key(ts: datetime) -> tuple[int, int]:
-    return ts.weekday(), ts.hour
+def _bucket_key(ts: datetime, tz: TzInfo) -> tuple[int, int]:
+    """Сэмплы хранятся в UTC (maps_scraper.py/manual.py) - без перевода в локальную
+    таймзону день/час получились бы смещены на разницу с UTC (для Tomsk - на 7 часов)."""
+    local = ts.astimezone(tz)
+    return local.weekday(), local.hour
 
 
 def _percentile(sorted_values: list[float], fraction: float) -> float:
@@ -54,7 +57,7 @@ def bucket_stats(history: list[PriceSample], weekday: int, hour: int, now: datet
     prices = sorted(
         sample.price
         for sample in history
-        if sample.ts >= window_start and _bucket_key(sample.ts) == (weekday, hour)
+        if sample.ts >= window_start and _bucket_key(sample.ts, now.tzinfo) == (weekday, hour)
     )
     if not prices:
         return BucketStats(weekday, hour, None, None, 0)
