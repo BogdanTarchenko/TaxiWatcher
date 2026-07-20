@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Taxi Watcher</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="apple-touch-icon" href="static/icon-180.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="Taxi" />
+  <meta name="theme-color" content="#C1651E" />
+  <link rel="stylesheet" href="static/style.css" />
+</head>
+<body>
+  <header class="masthead">
+    <h1>Taxi Watcher</h1>
+    <p class="subtitle">Дом ⇄ офис, цена Yandex Go</p>
+  </header>
+
+  <main>
+    <section id="cards" class="cards">
+      <article class="card" data-direction="office">
+        <h2>Дом → офис</h2>
+        <p class="price">…</p>
+        <p class="meta"></p>
+        <ul class="best-today"></ul>
+      </article>
+      <article class="card" data-direction="home">
+        <h2>Офис → дом</h2>
+        <p class="price">…</p>
+        <p class="meta"></p>
+        <ul class="best-today"></ul>
+      </article>
+    </section>
+
+    <p id="paused-banner" class="banner hidden"></p>
+
+    <section class="panel">
+      <h2>Уведомления</h2>
+      <p id="push-hint" class="hint hidden">
+        Чтобы включить уведомления на iPhone: сначала добавь эту страницу на экран Домой
+        (кнопка «Поделиться» → «На экран Домой»), затем открой её оттуда.
+      </p>
+      <button id="subscribe-btn" type="button">Включить уведомления</button>
+    </section>
+
+    <section class="panel">
+      <h2>Сообщить цену вручную</h2>
+      <form id="report-form">
+        <label>
+          Направление
+          <select id="report-direction" required>
+            <option value="office">Дом → офис</option>
+            <option value="home">Офис → дом</option>
+          </select>
+        </label>
+        <label>
+          Цена, ₽
+          <input id="report-price" type="number" min="1" step="1" required />
+        </label>
+        <label>
+          Время в пути, мин (необязательно)
+          <input id="report-eta" type="number" min="0" step="1" />
+        </label>
+        <button type="submit">Записать</button>
+      </form>
+      <p id="report-status" class="hint"></p>
+    </section>
+
+    <footer id="settings-footer" class="footer"></footer>
+  </main>
+
+  <script src="static/app.js"></script>
+</body>
+</html>

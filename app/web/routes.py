@@ -2,15 +2,17 @@
 
 Единственная защита доступа - секретный путь (settings.app_secret_path),
 под которым смонтированы все роуты в create_app(); сам URL и есть "пароль".
-Статику (/, /manifest.json, /sw.js) сюда добавит отдельный этап (фронтенд).
 """
 
 from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from aiohttp import web
+
+STATIC_DIR = Path(__file__).parent / "static"
 
 from app.analysis import bucket_stats, evaluate
 from app.config import Settings
@@ -156,6 +158,18 @@ async def handle_push_unsubscribe(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+async def handle_index(request: web.Request) -> web.FileResponse:
+    return web.FileResponse(STATIC_DIR / "index.html")
+
+
+async def handle_manifest(request: web.Request) -> web.FileResponse:
+    return web.FileResponse(STATIC_DIR / "manifest.json")
+
+
+async def handle_service_worker(request: web.Request) -> web.FileResponse:
+    return web.FileResponse(STATIC_DIR / "sw.js")
+
+
 def create_app(
     settings: Settings,
     conn: sqlite3.Connection,
@@ -168,6 +182,11 @@ def create_app(
     subapp["conn"] = conn
     subapp["scheduler"] = scheduler
     subapp["vapid_keys"] = vapid_keys
+
+    subapp.router.add_get("/", handle_index)
+    subapp.router.add_get("/manifest.json", handle_manifest)
+    subapp.router.add_get("/sw.js", handle_service_worker)
+    subapp.router.add_static("/static/", STATIC_DIR)
 
     subapp.router.add_get("/api/status", handle_status)
     subapp.router.add_post("/api/report_price", handle_report_price)
