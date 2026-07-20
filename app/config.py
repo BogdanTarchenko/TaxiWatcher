@@ -35,6 +35,8 @@ class Settings:
     poll_interval_min: int
     vapid_contact_email: str
     app_secret_path: str
+    good_price_threshold: float
+    good_price_step: float
 
 
 def _require(name: str) -> str:
@@ -90,4 +92,6 @@ def load_settings(env_file: Path | str = ".env") -> Settings:
         poll_interval_min=_parse_int("POLL_INTERVAL_MIN"),
         vapid_contact_email=_require("VAPID_CONTACT_EMAIL"),
         app_secret_path=_require("APP_SECRET_PATH"),
+        good_price_threshold=_parse_float("GOOD_PRICE_THRESHOLD"),
+        good_price_step=_parse_float("GOOD_PRICE_STEP"),
     )

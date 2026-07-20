@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS notifications_log (
     direction TEXT NOT NULL CHECK (direction IN ('to_office', 'to_home')),
     ts TEXT NOT NULL,
     price REAL NOT NULL,
-    notif_type TEXT NOT NULL CHECK (notif_type IN ('best', 'acceptable'))
+    notif_type TEXT NOT NULL CHECK (notif_type IN ('good_price', 'price_recovered'))
 );
 
 CREATE TABLE IF NOT EXISTS settings (

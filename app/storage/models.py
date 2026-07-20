@@ -76,23 +76,6 @@ def log_notification(conn: sqlite3.Connection, entry: NotificationLogEntry) -> i
     return cur.lastrowid
 
 
-def last_notification(conn: sqlite3.Connection, direction: str) -> NotificationLogEntry | None:
-    row = conn.execute(
-        "SELECT id, direction, ts, price, notif_type FROM notifications_log "
-        "WHERE direction = ? ORDER BY ts DESC LIMIT 1",
-        (direction,),
-    ).fetchone()
-    if row is None:
-        return None
-    return NotificationLogEntry(
-        id=row["id"],
-        direction=row["direction"],
-        ts=datetime.fromisoformat(row["ts"]),
-        price=row["price"],
-        notif_type=row["notif_type"],
-    )
-
-
 def get_setting(conn: sqlite3.Connection, key: str) -> str | None:
     row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
     return row["value"] if row else None

@@ -201,7 +201,7 @@ async function submitReport(event) {
   loadStatus();
 }
 
-const REFRESH_INTERVAL_MS = 60000;
+const REFRESH_INTERVAL_MS = 30000;
 
 document.getElementById("subscribe-btn").addEventListener("click", subscribeToPush);
 document.getElementById("report-form").addEventListener("submit", submitReport);

@@ -134,8 +134,9 @@ class PriceScheduler:
             self._conn,
             self._settings.vapid_contact_email,
             direction,
-            evaluation,
-            price.eta_min,
+            price.amount,
+            self._settings.good_price_threshold,
+            self._settings.good_price_step,
             now,
         )
         return evaluation
